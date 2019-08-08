@@ -1,4 +1,5 @@
-"""Helper for evaluation on the Labeled Faces in the Wild dataset 
+#coding=utf-8
+"""Helper for evaluation on the Labeled Faces in the Wild dataset
 """
 
 # MIT License
@@ -37,11 +38,28 @@ from sklearn.decomposition import PCA
 import mxnet as mx
 from mxnet import ndarray as nd
 import struct
+import cv2
 
 def read_bin(featFn):
     with open(featFn, "rb") as f:
         featLen, _, _, _ = struct.unpack("4i", f.read(16))
         return np.array(struct.unpack("%df" % (featLen), f.read()))
+
+def calculate_sim(embeddings1, embeddings2):
+    assert (len(embeddings1) == len(embeddings2))
+    assert (len(embeddings1[0]) == len(embeddings2[0]))
+    simList = []
+    for idx in range(len(embeddings1)):
+        '''
+        l2_norm = cv2.norm(embeddings1[idx], cv2.NORM_L2)
+        embeddings1_normal = embeddings1[idx]/ l2_norm
+        l2_norm = cv2.norm(embeddings2[idx], cv2.NORM_L2)
+        embeddings2_normal = embeddings2[idx]/ l2_norm
+        score = np.dot(embeddings1_normal, embeddings2_normal.T)
+        '''
+        score = np.dot(embeddings1[idx], embeddings2[idx].T)
+        simList.append(score)
+    return np.array(simList)
 
 def calculate_roc(thresholds, embeddings1, embeddings2, actual_issame, nrof_folds=10, pca = 0):
     assert(len(embeddings1) == len(embeddings2))
@@ -57,8 +75,9 @@ def calculate_roc(thresholds, embeddings1, embeddings2, actual_issame, nrof_fold
     #print('pca', pca)
     
     if pca==0:
-      diff = np.subtract(embeddings1, embeddings2)
-      dist = np.sum(np.square(diff),1)
+        #diff = np.subtract(embeddings1, embeddings2)
+        #dist = np.sum(np.square(diff),1)
+        dist = calculate_sim(embeddings1, embeddings2)
     
     for fold_idx, (train_set, test_set) in enumerate(k_fold.split(indices)):
         #print('train_set', train_set)
@@ -84,7 +103,7 @@ def calculate_roc(thresholds, embeddings1, embeddings2, actual_issame, nrof_fold
         for threshold_idx, threshold in enumerate(thresholds):
             _, _, acc_train[threshold_idx] = calculate_accuracy(threshold, dist[train_set], actual_issame[train_set])
         best_threshold_index = np.argmax(acc_train)
-        print('ROC: %d, best thresh: %f\n' % (fold_idx, thresholds[best_threshold_index]))
+        print('ROC: %d, best thresh: %f' % (fold_idx, thresholds[best_threshold_index]))
         for threshold_idx, threshold in enumerate(thresholds):
             tprs[fold_idx,threshold_idx], fprs[fold_idx,threshold_idx], _ = calculate_accuracy(threshold, dist[test_set], actual_issame[test_set])
         _, _, accuracy[fold_idx] = calculate_accuracy(thresholds[best_threshold_index], dist[test_set], actual_issame[test_set])
@@ -94,7 +113,8 @@ def calculate_roc(thresholds, embeddings1, embeddings2, actual_issame, nrof_fold
     return tpr, fpr, accuracy
 
 def calculate_accuracy(threshold, dist, actual_issame):
-    predict_issame = np.less(dist, threshold)
+    #predict_issame = np.less(dist, threshold)
+    predict_issame = np.greater(dist, threshold)
     tp = np.sum(np.logical_and(predict_issame, actual_issame))
     fp = np.sum(np.logical_and(predict_issame, np.logical_not(actual_issame)))
     tn = np.sum(np.logical_and(np.logical_not(predict_issame), np.logical_not(actual_issame)))
@@ -115,8 +135,9 @@ def calculate_val(thresholds, embeddings1, embeddings2, actual_issame, far_targe
     val = np.zeros(nrof_folds)
     far = np.zeros(nrof_folds)
     
-    diff = np.subtract(embeddings1, embeddings2)
-    dist = np.sum(np.square(diff),1)
+    #diff = np.subtract(embeddings1, embeddings2)
+    #dist = np.sum(np.square(diff),1)
+    dist = calculate_sim(embeddings1, embeddings2)
     indices = np.arange(nrof_pairs)
     
     for fold_idx, (train_set, test_set) in enumerate(k_fold.split(indices)):
@@ -125,12 +146,13 @@ def calculate_val(thresholds, embeddings1, embeddings2, actual_issame, far_targe
         far_train = np.zeros(nrof_thresholds)
         for threshold_idx, threshold in enumerate(thresholds):
             _, far_train[threshold_idx] = calculate_val_far(threshold, dist[train_set], actual_issame[train_set])
+        max_far_train = np.max(far_train)
         if np.max(far_train)>=far_target:
             f = interpolate.interp1d(far_train, thresholds, kind='slinear')
             threshold = f(far_target)
         else:
             threshold = 0.0
-        print('FAR: %d, best thresh: %f\n'%(fold_idx,threshold))
+        print('FAR: %d, best thresh: %f'%(fold_idx,threshold))
         val[fold_idx], far[fold_idx] = calculate_val_far(threshold, dist[test_set], actual_issame[test_set])
   
     val_mean = np.mean(val)
@@ -138,8 +160,29 @@ def calculate_val(thresholds, embeddings1, embeddings2, actual_issame, far_targe
     val_std = np.std(val)
     return val_mean, val_std, far_mean
 
+def calculate_tar_far(thresholds, embeddings1, embeddings2, actual_issame, far_target):
+    assert (len(embeddings1) == len(embeddings2))
+    assert (len(embeddings1[0]) == len(embeddings2[0]))
+
+    dist = calculate_sim(embeddings1, embeddings2)
+    tar_total = np.zeros(len(thresholds))
+    far_total = np.zeros(len(thresholds))
+    for threshold_idx, threshold in enumerate(thresholds):
+        tar_total[threshold_idx], far_total[threshold_idx] = calculate_val_far(threshold, dist, actual_issame)
+
+    if np.max(far_total) >= far_target:
+        f = interpolate.interp1d(far_total, thresholds, kind='slinear')
+        threshold = f(far_target)
+    else:
+        threshold = 0.0
+
+    tar, far = calculate_val_far(threshold, dist, actual_issame)
+    print('TAR: %f @ FAR: %f, thresh: %f' % (tar, far, threshold))
+
+
 def calculate_val_far(threshold, dist, actual_issame):
-    predict_issame = np.less(dist, threshold)
+    #predict_issame = np.less(dist, threshold)
+    predict_issame = np.greater(dist, threshold)
     true_accept = np.sum(np.logical_and(predict_issame, actual_issame))
     false_accept = np.sum(np.logical_and(predict_issame, np.logical_not(actual_issame)))
     n_same = np.sum(actual_issame)
@@ -156,6 +199,9 @@ def evaluate(embeddings1, embeddings2, actual_issame, nrof_folds=10, pca = 0):
     thresholds = np.arange(0, 4, 0.001)
     val, val_std, far = calculate_val(thresholds, embeddings1, embeddings2,
         np.asarray(actual_issame), 1e-3, nrof_folds=nrof_folds)
+
+    calculate_tar_far(thresholds, embeddings1, embeddings2, actual_issame, 1e-2)
+
     return tpr, fpr, accuracy, val, val_std, far
 
 def get_paths(lfw_dir, pairs, file_ext):
@@ -218,5 +264,6 @@ def useFeatTestModel(lfw_feat_set):
     #return
 
 if __name__ == "__main__":
-    lfw_feat_set = 'E:/work/data/faceRecognize/faceRecEval/feats/lfw/model-r34-amf'
+    lfw_feat_set = 'E:/work/data/faceRecognize/faceRecEval/feats/lfw/mobileFaceNet'
+    #lfw_feat_set = 'E:/work/data/faceRecognize/faceRecEval/feats/lfw/model-r34-amf'
     useFeatTestModel(lfw_feat_set)
